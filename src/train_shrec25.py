@@ -292,15 +292,22 @@ def selftest(a, up, cfg):
     B = cfg.total_bs
     x = torch.randn(B, 8192, 3).cuda() * 0.5
     y = torch.randint(0, cfg.model.cls_dim, (B,)).cuda()
-    loader = [(x.cpu(), y.cpu())] * 3
+    loader = [(x.cpu(), y.cpu())] * 8
+    r.train_epoch(model, loader[:2], opt)                # warm-up: CUDA init, Triton/cuDNN autotune
     torch.cuda.synchronize(); t = time.time()
-    loss, _ = r.train_epoch(model, loader, opt)
-    torch.cuda.synchronize(); dt = (time.time() - t) / 3
+    loss, _ = r.train_epoch(model, loader, opt)          # steady state
+    torch.cuda.synchronize(); dt = (time.time() - t) / len(loader)
+    t = time.time()
+    for _ in range(5):
+        r.fps_gather(x, r.point_all, r.npoints)
+    torch.cuda.synchronize(); dt_fps = (time.time() - t) / 5
     logits, _ = r.predict(model, loader[:1]); logits_v, _ = r.predict(model, loader[:1], vote=2)
     assert logits.shape == (B, cfg.model.cls_dim) and torch.isfinite(logits).all() and torch.isfinite(logits_v).all()
     n_par = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    n_it = 7376 // B                                      # train split of the final release
     log(f"SELFTEST {a.model} OK on {torch.cuda.get_device_name(0)}: loss {loss:.3f}, {dt * 1000:.0f} ms/train-iter "
-        f"(bs {B}), peak mem {torch.cuda.max_memory_allocated() / 2**30:.1f} GiB, {n_par / 1e6:.2f} M params, "
+        f"(bs {B}, steady state; of which input FPS {dt_fps * 1000:.0f} ms) -> ~{dt * n_it:.0f} s/epoch train, "
+        f"~{dt * n_it * 300 / 3600:.1f} h / 300 epochs (+ val), peak mem {torch.cuda.max_memory_allocated() / 2**30:.1f} GiB, {n_par / 1e6:.2f} M params, "
         f"impl {up['impl']}")
 
 

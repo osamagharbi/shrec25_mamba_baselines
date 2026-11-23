@@ -41,7 +41,7 @@ the other SHREC'25 work (HierGIN, RINet), so results are comparable.
 
 ```bash
 # 1. get the code on a Jean-Zay login node (later updates: git pull)
-git clone git@github.com:osamagharbi/shrec25_mamba_baselines.git $WORK/shrec25_mamba_baselines
+git clone https://github.com/osamagharbi/shrec25_mamba_baselines.git $WORK/shrec25_mamba_baselines
 cd $WORK/shrec25_mamba_baselines
 
 # 2. one-time env, on the login node (~10 min): upstream clones + one env per GPU type

@@ -61,16 +61,31 @@ def log(*a):
 
 
 # ----------------------------------------------------------------------------- download
-def remote_info(url):
-    out = subprocess.run(["curl", "-sSIL", "--max-time", "60", url], capture_output=True, text=True).stdout
-    size, mod = None, None
-    for line in out.splitlines():
-        k, _, v = line.partition(":")
-        if k.lower() == "content-length":
-            size = int(v.strip())
-        elif k.lower() == "last-modified":
-            mod = v.strip()
-    return size, mod
+def remote_info(url, tries=10):
+    """(size, last_modified) of the FINAL 2xx response. The IDRIS proxy intermittently answers
+    CONNECT with its own 403 page (which has a Content-Length too) -> retry those."""
+    status = None
+    for k in range(1, tries + 1):
+        out = subprocess.run(["curl", "-sSIL", "--max-time", "60", url], capture_output=True, text=True).stdout
+        status, size, mod = None, None, None
+        for line in out.splitlines():
+            if line.startswith("HTTP/"):                   # new response block (proxy, redirect, server)
+                parts = line.split()
+                status = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
+                size = mod = None
+                continue
+            key, _, v = line.partition(":")
+            if key.lower() == "content-length":
+                size = int(v.strip())
+            elif key.lower() == "last-modified":
+                mod = v.strip()
+        if status is not None and 200 <= status < 300 and size is not None:
+            return size, mod
+        if status == 404:
+            break
+        log(f"  HEAD {url.rsplit('/', 1)[-1]}: HTTP {status} (try {k}/{tries})")
+        time.sleep(min(60, 5 * k))
+    return None, None
 
 
 def sha256(path, bufsize=1 << 24):
@@ -81,27 +96,42 @@ def sha256(path, bufsize=1 << 24):
     return h.hexdigest()
 
 
-def fetch(url, dest):
-    """Resumable download; verified against the server's Content-Length."""
+def fetch(url, dest, required=True, attempts=20):
+    """Resumable download, verified against the server's Content-Length (2xx response only).
+    Proxy 403s are retried; a non-required file (old label versions) is skipped on failure."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     size, mod = remote_info(url)
     if size is None:
-        raise RuntimeError(f"no response from {url} (is this node online? use the prepost "
-                           f"partition or PREP_TARGET=login)")
+        if dest.is_file() and dest.stat().st_size > 0:
+            log(f"  {dest.name}: server unreachable, keeping the existing copy")
+            return {"url": url, "bytes": dest.stat().st_size, "last_modified": None, "sha256": sha256(dest)}
+        if not required:
+            log(f"  WARNING {dest.name}: unreachable, skipped (provenance only)")
+            return {"url": url, "error": "unreachable"}
+        raise RuntimeError(f"no 2xx response from {url} (proxy blocking? retry later, or check "
+                           f"`curl -I {url}` on this node)")
     if dest.is_file() and dest.stat().st_size == size:
         log(f"  have {dest.name} ({size / 1e6:.1f} MB)")
     else:
         log(f"  downloading {url} ({size / 1e6:.1f} MB)")
         part = dest.with_suffix(dest.suffix + ".part")
-        for attempt in range(1, 6):
-            rc = subprocess.run(["curl", "-fL", "--retry", "5", "--retry-delay", "10", "-C", "-",
-                                 "-sS", "-o", str(part), url]).returncode
-            if rc == 0 and part.stat().st_size == size:
+        for attempt in range(1, attempts + 1):
+            have = part.stat().st_size if part.exists() else 0
+            if have > size:                                # stale partial from a different file version
+                part.unlink(); have = 0
+            if have == size:
                 break
-            log(f"  attempt {attempt} rc={rc}, have {part.stat().st_size if part.exists() else 0}/{size} B")
-            time.sleep(15)
+            rc = subprocess.run(["curl", "-fL", "-C", "-", "-sS", "-o", str(part), url]).returncode
+            have = part.stat().st_size if part.exists() else 0
+            if have == size:
+                break
+            log(f"  attempt {attempt}/{attempts}: rc={rc}, have {have}/{size} B -> retry")
+            time.sleep(min(60, 5 * attempt))
         else:
-            raise RuntimeError(f"download failed: {url}")
+            if required:
+                raise RuntimeError(f"download failed after {attempts} attempts: {url}")
+            log(f"  WARNING {dest.name}: download failed, skipped (provenance only)")
+            return {"url": url, "error": "download failed"}
         part.rename(dest)
     return {"url": url, "bytes": size, "last_modified": mod, "sha256": sha256(dest)}
 
@@ -132,8 +162,10 @@ def extract(archive, out_dir, n_expected_min):
 def cmd_download(a):
     raw = Path(a.raw_root)
     man = {"source": BASE_URL, "fetched": time.strftime("%F %T"), "files": {}}
-    for name in list(LABELS_FINAL.values()) + LABELS_OLDER:
+    for name in LABELS_FINAL.values():
         man["files"][name] = fetch(BASE_URL + name, raw / "labels" / name)
+    for name in LABELS_OLDER:                              # provenance only: never fatal
+        man["files"][name] = fetch(BASE_URL + name, raw / "labels" / name, required=False)
     for name in ARCHIVES.values():
         man["files"][name] = fetch(BASE_URL + name, raw / "archives" / name)
     (raw / "download_manifest.json").write_text(json.dumps(man, indent=1))

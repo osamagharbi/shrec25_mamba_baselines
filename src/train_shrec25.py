@@ -9,7 +9,7 @@ What comes from the upstream repo, unchanged:
   random 1024 + ScaleAndTranslate), mean logits).
 
 What this driver adds (the upstream runners select checkpoints on the TEST set):
-  * official SHREC'25 data (updated 28/10/25 labels), train / val split for model selection
+  * SHREC'25 final release (rotated meshes, 98 classes), train / val split for model selection
   * early stopping on the val metric (patience, min epochs), best-val checkpoint
   * resumable across Slurm jobs (ckpt-last every epoch, time budget -> exit 3 = "continue")
   * final test evaluation of the best-val checkpoint: OA, macro-F1, mean class acc (+ vote)
@@ -37,7 +37,10 @@ import torch
 import torch.nn as nn
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import shrec25_metrics  # noqa: E402
 T0 = time.time()
+DISPLAY = {"mamba3d": "Mamba3D", "pointmamba": "PointMamba"}
 
 
 def log(msg):
@@ -134,18 +137,25 @@ def load_data(root, smoke):
 
 
 # ----------------------------------------------------------------------------- metrics
-def metrics(y, p, num_classes=99):
-    y, p = np.asarray(y), np.asarray(p)
-    present = np.unique(y)
-    cm = np.zeros((num_classes, num_classes), dtype=np.int64)
-    np.add.at(cm, (y, p), 1)
-    tp = np.diag(cm).astype(float)
-    prec = np.divide(tp, cm.sum(0), out=np.zeros(num_classes), where=cm.sum(0) > 0)
-    rec = np.divide(tp, cm.sum(1), out=np.zeros(num_classes), where=cm.sum(1) > 0)
-    f1 = np.divide(2 * prec * rec, prec + rec, out=np.zeros(num_classes), where=(prec + rec) > 0)
-    return {"acc": float((y == p).mean() * 100), "f1_macro": float(f1[present].mean() * 100),
-            "f1_macro_all99": float(f1.mean() * 100), "mean_class_acc": float(rec[present].mean() * 100),
-            "n": int(len(y)), "n_classes_present": int(len(present))}
+def metrics(y, p):
+    """Percentages; same implementation as the standalone src/shrec25_metrics.py sent to the organisers."""
+    r, _ = shrec25_metrics.compute(y, p)
+    pct = lambda k: r[k] * 100                               # noqa: E731
+    return {"acc": pct("accuracy"), "f1_macro": pct("f1_macro"), "precision_macro": pct("precision_macro"),
+            "recall_macro": pct("recall_macro"), "mean_class_acc": pct("balanced_accuracy"),
+            "f1_macro_sklearn": pct("f1_macro_sklearn"), "f1_weighted": pct("f1_weighted"),
+            "n": r["n"], "n_classes_present": r["n_classes_in_ground_truth"]}
+
+
+class RandomSO3:
+    """Uniform random 3-D rotation per point cloud (QR of a Gaussian, det +1), on GPU, in place."""
+
+    def __call__(self, pc):
+        q, r = torch.linalg.qr(torch.randn(pc.size(0), 3, 3, device=pc.device))
+        q = q * torch.sign(torch.diagonal(r, dim1=1, dim2=2)).unsqueeze(1)
+        q[torch.det(q) < 0, :, 0] *= -1
+        pc[:, :, :3] = pc[:, :, :3] @ q
+        return pc
 
 
 # ----------------------------------------------------------------------------- core
@@ -155,8 +165,12 @@ class Runner:
         self.npoints = cfg.npoints
         self.point_all = {1024: 1200, 2048: 2400, 4096: 4800, 8192: 8192}[cfg.npoints]
         T = up["T"]
-        self.train_tf = {"scale_translate": T.PointcloudScaleAndTranslate(),
-                         "rotate": T.PointcloudRotate(), "none": None}[cfg.get("train_aug", "scale_translate")]
+        st, so3 = T.PointcloudScaleAndTranslate(), RandomSO3()
+        self.aug = a.train_aug or cfg.get("train_aug", "scale_translate")
+        self.train_tf = {"scale_translate": st,                       # upstream ModelNet recipe
+                         "so3": lambda p: st(so3(p)),                 # + uniform random rotation
+                         "rotate": T.PointcloudRotate(),              # upstream ScanObjectNN (y-axis)
+                         "none": None}[self.aug]
         self.test_tf = T.PointcloudScaleAndTranslate()     # upstream vote augmentation
 
     def fps_gather(self, pts, n_all, n_keep=None):
@@ -251,6 +265,7 @@ def build_model(a, up, cfg):
 def selftest(a, up, cfg):
     """Kernel + model check on random data (no dataset needed)."""
     set_seed(0)
+    a.train_aug = a.train_aug or "so3"
     model = build_model(a, up, cfg)
     opt, _ = up["builder"].build_opti_sche(model, cfg)
     r = Runner(a, up, cfg)
@@ -284,6 +299,10 @@ def main():
     ap.add_argument("--monitor", choices=["acc", "f1_macro"], default="acc",
                     help="val metric for early stopping / best checkpoint (upstream selects on acc)")
     ap.add_argument("--vote", type=int, default=10, help="test-time votes (upstream: 10); 0 = off")
+    ap.add_argument("--train-aug", choices=["scale_translate", "so3", "rotate", "none"], default=None,
+                    help="default: config train_aug (upstream ModelNet recipe = scale_translate); "
+                         "so3 = + uniform random rotation (the SHREC'25 meshes are randomly rotated)")
+    ap.add_argument("--run-tag", default="", help="label used in the submission file names")
     ap.add_argument("--init-ckpt", default=None, help="pre-trained weights (load_model_from_ckpt)")
     ap.add_argument("--num-workers", type=int, default=int(os.environ.get("SLURM_CPUS_PER_TASK", 8)))
     ap.add_argument("--stop-after-minutes", type=float, default=0, help="time budget of this process (0 = none)")
@@ -412,7 +431,8 @@ def main():
     lv, yv = runner.predict(model, val_loader)
     lt, yt = runner.predict(model, test_loader)
     res = {"model": a.model, "seed": a.seed, "config": a.config, "repo": str(up["repo"]), "impl": up["impl"],
-           "init": a.init_ckpt or "scratch", "best_epoch": best["epoch"], "epochs_trained": st["epoch"],
+           "init": a.init_ckpt or "scratch", "train_aug": runner.aug, "uses_potential": False,
+           "best_epoch": best["epoch"], "epochs_trained": st["epoch"],
            "stopped_by": st["stopped_by"], "monitor": a.monitor, "patience": a.patience,
            "train_hours": st["train_seconds"] / 3600, "gpu": torch.cuda.get_device_name(0), "jobs": st["jobs"],
            "data_root": str(a.data_root), "smoke": a.smoke,
@@ -427,6 +447,19 @@ def main():
         for k, i in enumerate(te_idx):
             row = [te["ids"][i], te["pdb"][i], int(yt[k]), int(lt[k].argmax())]
             w.writerow(row + ([int(lt_vote[k].argmax())] if a.vote else []))
+    # organisers' format: pdb_id, protein_id, class_id (ground truth), predicted_class;
+    # the file name states that the electrostatic potential is NOT used (xyz only) and the rotated data
+    sub = out / "submission"; sub.mkdir(exist_ok=True)
+    tag = f"_{a.run_tag}" if a.run_tag else ""
+    base = f"SHREC25_{DISPLAY[a.model]}{tag}_xyz-only_NO-potential_rotated-dataset_seed{a.seed}"
+    preds = {"": lt} | ({f"_vote{a.vote}": lt_vote} if a.vote else {})
+    for suffix, L in preds.items():
+        with open(sub / f"{base}{suffix}.csv", "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["pdb_id", "protein_id", "class_id", "predicted_class"])
+            for k, i in enumerate(te_idx):
+                w.writerow([te["pdb"][i], te["ids"][i], int(yt[k]), int(L[k].argmax())])
+    res["submission_files"] = sorted(p.name for p in sub.glob(f"{base}*.csv"))
     write_json(res, out / "test_metrics.json")
     st["phase"] = "done"; save_last(); progress()
     t, v = res["test"], res.get("test_vote", {})

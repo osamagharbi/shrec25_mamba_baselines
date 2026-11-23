@@ -1,7 +1,7 @@
 #!/bin/bash
 # status.sh [STUDY] -- progress of every run of a study (default: the newest one). Read-only.
 #   ./jeanzay/status.sh
-#   ./jeanzay/status.sh shrec25_official_20261123_1630
+#   ./jeanzay/status.sh shrec25_final_20261123_1630
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 STUDY="${1:-$(ls -1t "$RUNS_ROOT" 2>/dev/null | head -1)}"
 DIR="$RUNS_ROOT/$STUDY"

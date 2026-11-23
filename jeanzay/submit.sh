@@ -1,6 +1,6 @@
 #!/bin/bash
 # ===========================================================================
-#  submit.sh -- SHREC'25 (official, labels updated 28/10/25): data prep + Mamba3D and
+#  submit.sh -- SHREC'25 (final release: rotated meshes, 98 classes): data prep + Mamba3D and
 #  PointMamba training/evaluation, all runs in parallel, each on the GPU type that is
 #  expected to FINISH first. Run from a Jean-Zay LOGIN node after ./jeanzay/setup_env.sh.
 #
@@ -9,6 +9,7 @@
 #    SMOKE=1 ./jeanzay/submit.sh          # 30-min plumbing test (tiny subsets, 2 epochs)
 #    SEEDS="0 1 2" ./jeanzay/submit.sh    # 3 seeds per model (6 parallel runs)
 #    INIT=pretrained ./jeanzay/submit.sh  # start from the upstream ShapeNet pre-training
+#    AUGS=so3 ./jeanzay/submit.sh         # only the rotation-augmented arm (default: both arms)
 #    TARGETS="a100 v100" ./jeanzay/submit.sh  /  FORCE_TARGET=v100 ./jeanzay/submit.sh
 #
 #  Jobs (one Slurm job = one GPU, never DDP):
@@ -29,6 +30,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 MODELS="${MODELS:-mamba3d pointmamba}"
 SEEDS="${SEEDS:-0}"
 INIT="${INIT:-scratch}"                    # scratch | pretrained
+AUGS="${AUGS:-upstream so3}"              # upstream = ModelNet recipe (ScaleAndTranslate); so3 = + random rotation
 TARGETS="${TARGETS:-h100 a100 v100}"       # candidates; only those with a built env are probed
 FORCE_TARGET="${FORCE_TARGET:-}"
 TIME="${TIME:-20:00:00}"                   # t3 walltime per link
@@ -45,7 +47,7 @@ PREP_CPUS="${PREP_CPUS:-16}"
 PREP_ACCOUNT="${PREP_ACCOUNT:-acu@v100}"
 DRY_RUN="${DRY_RUN:-0}"
 SMOKE="${SMOKE:-0}"
-STUDY="${STUDY:-shrec25_official_$( [ "$SMOKE" = 1 ] && echo smoke_ )$(date +%Y%m%d_%H%M)}"
+STUDY="${STUDY:-shrec25_final_$( [ "$SMOKE" = 1 ] && echo smoke_ )$(date +%Y%m%d_%H%M)}"
 if [ "$SMOKE" = 1 ]; then TIME=00:30:00; NCHAIN=1; MAX_EPOCHS=2; fi
 
 STUDY_DIR="$RUNS_ROOT/$STUDY"
@@ -115,7 +117,7 @@ cat <<BANNER
 ===========================================================================
  study      : $STUDY_DIR
  data       : $PROC_ROOT $( [ -f "$PROC_ROOT/PREP_DONE" ] && echo "(ready)" || echo "(prep job: $PREP_TARGET)")
- runs       : $(for M in $MODELS; do printf "%s[%s] " "$M" "${CHOICE[$M]}"; done) x seeds {$SEEDS}, init $INIT
+ runs       : $(for M in $MODELS; do printf "%s[%s] " "$M" "${CHOICE[$M]}"; done) x aug {$AUGS} x seeds {$SEEDS}, init $INIT
  training   : max $MAX_EPOCHS epochs, early stop on val $MONITOR (patience $PATIENCE, min $MIN_EPOCHS),
               vote $VOTE, $NCHAIN x $TIME links$( [ "$SMOKE" = 1 ] && echo "  [SMOKE]")
 ===========================================================================
@@ -161,8 +163,11 @@ MANIFEST="$STUDY_DIR/MANIFEST.tsv"
 LAST_JIDS=()
 for M in $MODELS; do
   T="${CHOICE[$M]}"
+  for AUG in $AUGS; do
+  case "$AUG" in upstream) TRAIN_AUG=scale_translate ;; so3) TRAIN_AUG=so3 ;; *) echo "AUGS: upstream|so3"; exit 1 ;; esac
   for S in $SEEDS; do
-    NAME="${M}_${INIT}_s${S}"
+    TAGN="$AUG"; [ "$INIT" = pretrained ] && TAGN="$AUG-pretrained"
+    NAME="${M}_${TAGN}_s${S}"
     RUN_DIR="$STUDY_DIR/$NAME"; mkd "$RUN_DIR/state" "$LOGS/$NAME"
     rm -f "$RUN_DIR/state/FAILED"                      # a fresh submit retries a failed run
     [ -f "$RUN_DIR/state/DONE" ] && { echo "[train] $NAME already DONE -> skipped"; continue; }
@@ -174,7 +179,7 @@ for M in $MODELS; do
       # shellcheck disable=SC2046,SC2086
       JID=$(run sbatch --parsable $(target_flags "$T") --time="$TIME" --job-name="s25_${NAME}" $DEP \
               --output="$LOGS/$NAME/%j.out" \
-              --export=ALL,PROJ="$PROJ",ARCH="$T",MODEL="$M",SEED="$S",RUN_DIR="$RUN_DIR",PATIENCE="$PATIENCE",MIN_EPOCHS="$MIN_EPOCHS",MAX_EPOCHS="$MAX_EPOCHS",MONITOR="$MONITOR",VOTE="$VOTE",INIT_CKPT="$INIT_CKPT",SMOKE="$SMOKE",WALL_MIN="$(wall_min "$TIME")" \
+              --export=ALL,PROJ="$PROJ",ARCH="$T",MODEL="$M",SEED="$S",RUN_DIR="$RUN_DIR",PATIENCE="$PATIENCE",MIN_EPOCHS="$MIN_EPOCHS",MAX_EPOCHS="$MAX_EPOCHS",MONITOR="$MONITOR",VOTE="$VOTE",INIT_CKPT="$INIT_CKPT",TRAIN_AUG="$TRAIN_AUG",RUN_TAG="$TAGN",SMOKE="$SMOKE",WALL_MIN="$(wall_min "$TIME")" \
               "$PROJ/jeanzay/train.slurm")
       IDS+=("$JID"); DEP="--dependency=afterany:$JID"
     done
@@ -184,6 +189,7 @@ for M in $MODELS; do
     fi
     echo "[train] $NAME on $T: jobs ${IDS[*]}"
     LAST_JIDS+=("${IDS[-1]}")
+  done
   done
 done
 

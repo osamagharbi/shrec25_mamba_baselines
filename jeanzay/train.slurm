@@ -5,7 +5,7 @@
 #  ckpt-last.pth, trains until early stopping / max epochs / its time budget, and the
 #  link that finishes training also runs the test evaluation. Spare links exit at once.
 #  Env (from submit.sh): PROJ ARCH MODEL SEED RUN_DIR PATIENCE MIN_EPOCHS MAX_EPOCHS
-#                        MONITOR VOTE INIT_CKPT SMOKE RESERVE_MIN WALL_MIN
+#                        MONITOR VOTE INIT_CKPT TRAIN_AUG RUN_TAG SMOKE RESERVE_MIN WALL_MIN
 # ===========================================================================
 #SBATCH --job-name=s25_train
 #SBATCH --ntasks=1
@@ -34,6 +34,8 @@ ARGS=(--model "$MODEL" --repo "$(repo_dir "$MODEL")" --data-root "$PROC_ROOT" --
       --vote "$VOTE" --num-workers "${SLURM_CPUS_PER_TASK:-8}" --stop-after-minutes "$BUDGET")
 [ -n "${MAX_EPOCHS:-}" ] && ARGS+=(--max-epochs "$MAX_EPOCHS")
 [ -n "${INIT_CKPT:-}" ]  && ARGS+=(--init-ckpt "$INIT_CKPT")
+[ -n "${TRAIN_AUG:-}" ]  && ARGS+=(--train-aug "$TRAIN_AUG")
+[ -n "${RUN_TAG:-}" ]    && ARGS+=(--run-tag "$RUN_TAG")
 [ "${SMOKE:-0}" = 1 ]    && ARGS+=(--smoke)
 
 timeout --signal=TERM "$(( LEFT - 3 ))m" python "$PROJ/src/train_shrec25.py" "${ARGS[@]}"

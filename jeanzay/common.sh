@@ -9,8 +9,8 @@ PROJ="${PROJ:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 # ---- where things live ----------------------------------------------------
 UPSTREAM_ROOT="${UPSTREAM_ROOT:-$WORK/shrec25_mamba/upstream}"     # upstream checkouts + ckpts
 ENV_ROOT="${ENV_ROOT:-$WORK/envs/shrec25_mamba}"                   # one pip --user base per GPU arch
-RAW_ROOT="${RAW_ROOT:-${SCRATCH:-$WORK}/shrec25_official/raw}"     # archives + extracted VTK (re-downloadable)
-PROC_ROOT="${PROC_ROOT:-$WORK/datasets/SHREC25_official/pc8192}"   # prepared point clouds (kept)
+RAW_ROOT="${RAW_ROOT:-${SCRATCH:-$WORK}/shrec25_final_rot/raw}"        # rotated archives + VTK (re-downloadable)
+PROC_ROOT="${PROC_ROOT:-$WORK/datasets/SHREC25_final_rot/pc8192}"      # final labels, prepared point clouds (kept)
 RUNS_ROOT="${RUNS_ROOT:-$PROJ/runs}"
 
 # ---- upstream code, pinned -------------------------------------------------

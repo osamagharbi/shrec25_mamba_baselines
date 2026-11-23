@@ -1,5 +1,5 @@
 # Mamba3D on SHREC'25 = upstream cfgs/finetune_modelnet.yaml (xhanxu/Mamba3D @ b519a9c)
-# with cls_dim 40 -> 99. Data comes from train_shrec25.py (no `dataset:` block).
+# with cls_dim 40 -> 98 (final release: 98 classes). Data comes from train_shrec25.py (no `dataset:` block).
 optimizer : {
   type: AdamW,
   kwargs: {
@@ -19,7 +19,7 @@ model : {
   trans_dim: 384,
   depth: 12,
   drop_path_rate: 0.2,
-  cls_dim: 99,
+  cls_dim: 98,
   num_heads: 6,
   group_size: 32,
   num_group: 128,

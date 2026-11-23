@@ -35,19 +35,23 @@ target_cfg() {
   case "$1" in
     v100) T_ACCOUNT="${V100_ACCOUNT:-acu@v100}"; T_CONSTRAINT="${V100_CONSTRAINT:-v100-32g}"
           T_QOS="${V100_QOS:-qos_gpu-t3}";       T_CPUS="${V100_CPUS:-10}"; T_ARCHMOD=""
+          T_DEVQOS="${V100_DEVQOS:-qos_gpu-dev}"
           T_SPEED="${SPEED_v100:-1.0}" ;;
     a100) T_ACCOUNT="${A100_ACCOUNT:-acu@a100}"; T_CONSTRAINT="${A100_CONSTRAINT:-a100}"
           T_QOS="${A100_QOS:-qos_gpu_a100-t3}";  T_CPUS="${A100_CPUS:-8}";  T_ARCHMOD="arch/a100"
+          T_DEVQOS="${A100_DEVQOS:-qos_gpu_a100-dev}"
           T_SPEED="${SPEED_a100:-2.0}" ;;
     h100) T_ACCOUNT="${H100_ACCOUNT:-acu@h100}"; T_CONSTRAINT="${H100_CONSTRAINT:-h100}"
           T_QOS="${H100_QOS:-qos_gpu_h100-t3}";  T_CPUS="${H100_CPUS:-24}"; T_ARCHMOD="arch/h100"
+          T_DEVQOS="${H100_DEVQOS:-qos_gpu_h100-dev}"
           T_SPEED="${SPEED_h100:-3.0}" ;;
     *) echo "unknown target '$1' (v100|a100|h100)" >&2; return 1 ;;
   esac
 }
-target_flags() {   # sbatch flags for one GPU on target $1
+target_flags() {   # sbatch flags for one GPU on target $1; $2 = dev -> short dev QoS (2 h max)
   target_cfg "$1" || return 1
-  echo "--account=$T_ACCOUNT --constraint=$T_CONSTRAINT --qos=$T_QOS --gres=gpu:1 --cpus-per-task=$T_CPUS --hint=nomultithread"
+  local q="$T_QOS"; [ "${2:-}" = dev ] && q="$T_DEVQOS"
+  echo "--account=$T_ACCOUNT --constraint=$T_CONSTRAINT --qos=$q --gres=gpu:1 --cpus-per-task=$T_CPUS --hint=nomultithread"
 }
 
 # ---- environment for one arch (used on login and compute nodes) -------------

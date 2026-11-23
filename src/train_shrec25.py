@@ -60,6 +60,22 @@ def import_upstream(model_name, repo):
     (the upstream tools/__init__ pulls in every runner + thop/mmcv/fvcore)."""
     repo = Path(repo).resolve()
     sys.path.insert(0, str(repo))
+    # Upstream `utils/` and `extensions/` have no __init__.py (PEP 420 namespace packages), and a
+    # namespace package loses to ANY regular package of the same name anywhere on sys.path
+    # (the IDRIS pytorch env ships one called `utils`). Bind every upstream top-level package
+    # to the repo explicitly so nothing else can shadow it.
+    import importlib.machinery
+    import types
+    for name in ("utils", "extensions", "models", "datasets", "tools"):
+        d = repo / name
+        for k in [k for k in sys.modules if k == name or k.startswith(name + ".")]:
+            del sys.modules[k]
+        if d.is_dir() and not (d / "__init__.py").is_file():
+            mod = types.ModuleType(name)
+            mod.__path__ = [str(d)]
+            mod.__spec__ = importlib.machinery.ModuleSpec(name, None, is_package=True)
+            mod.__spec__.submodule_search_locations = [str(d)]
+            sys.modules[name] = mod
     if model_name == "mamba3d":
         # upstream mamba_simple.py does sys.path.append("/home/Mamba3D/models/bimamba_ssm");
         # from ops.selective_scan_interface import ...  -> make that resolvable here.
@@ -71,6 +87,10 @@ def import_upstream(model_name, repo):
     import pointnet2_ops
     from pointnet2_ops import pointnet2_utils
     import knn_cuda
+    for name in ("utils", "models"):                   # fail loudly if anything still shadows them
+        f = Path(getattr(sys.modules[name], "__path__", [""])[0])
+        if f.resolve() != (repo / name).resolve():
+            raise ImportError(f"'{name}' resolved to {f}, expected {repo / name}")
 
     def load(name, path):
         spec = importlib.util.spec_from_file_location(name, path)

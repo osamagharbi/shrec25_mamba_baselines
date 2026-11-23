@@ -48,7 +48,8 @@ PREP_ACCOUNT="${PREP_ACCOUNT:-acu@v100}"
 DRY_RUN="${DRY_RUN:-0}"
 SMOKE="${SMOKE:-0}"
 STUDY="${STUDY:-shrec25_final_$( [ "$SMOKE" = 1 ] && echo smoke_ )$(date +%Y%m%d_%H%M)}"
-if [ "$SMOKE" = 1 ]; then TIME=00:30:00; NCHAIN=1; MAX_EPOCHS=2; fi
+QOS_KIND=""
+if [ "$SMOKE" = 1 ]; then TIME=00:30:00; NCHAIN=1; MAX_EPOCHS=2; QOS_KIND=dev; fi   # smoke -> dev QoS (starts fast)
 
 STUDY_DIR="$RUNS_ROOT/$STUDY"
 LOGS="$STUDY_DIR/logs"
@@ -75,13 +76,13 @@ declare -A START
 echo "[targets] asking Slurm for the estimated start of a ${TIME} 1-GPU job on: ${CANDS[*]}"
 for T in "${CANDS[@]}"; do
   # shellcheck disable=SC2046
-  OUT=$(sbatch --test-only $(target_flags "$T") --time="$TIME" --wrap=true 2>&1) || true
+  OUT=$(sbatch --test-only $(target_flags "$T" $QOS_KIND) --time="$TIME" --wrap=true 2>&1) || true
   S=$(grep -oE 'to start at [0-9T:-]+' <<<"$OUT" | awk '{print $4}' | head -1 || true)
   if [ -n "$S" ]; then
     START[$T]=$(date -d "$S" +%s 2>/dev/null || echo "$NOW")
     [ "${START[$T]}" -lt "$NOW" ] && START[$T]=$NOW
     target_cfg "$T"
-    printf "   %-5s %-12s %-16s start ~ %s (in %s min)%s\n" "$T" "$T_ACCOUNT" "$T_QOS" "$S" \
+    printf "   %-5s %-12s %-16s start ~ %s (in %s min)%s\n" "$T" "$T_ACCOUNT" "$([ "$QOS_KIND" = dev ] && echo "$T_DEVQOS" || echo "$T_QOS")" "$S" \
       $(( (${START[$T]} - NOW) / 60 )) "$([ -f "$ENV_ROOT/$T/SELFTEST_OK" ] && echo "" || echo "   [self-test pending]")"
   else
     echo "   $T: rejected -> $(tr '\n' ' ' <<<"$OUT" | cut -c1-160)"
@@ -151,7 +152,7 @@ for M in $MODELS; do
   T="${CHOICE[$M]}"
   if [ ! -f "$ENV_ROOT/$T/SELFTEST_OK" ] && [ -z "${ST[$T]:-}" ]; then
     # shellcheck disable=SC2046
-    ST[$T]=$(run sbatch --parsable $(target_flags "$T") --time=00:20:00 --job-name="s25_selftest_$T" \
+    ST[$T]=$(run sbatch --parsable $(target_flags "$T" dev) --time=00:20:00 --job-name="s25_selftest_$T" \
                --output="$LOGS/selftest_${T}_%j.out" --export=ALL,PROJ="$PROJ",ARCH="$T" "$PROJ/jeanzay/selftest.slurm")
     echo "[selftest] $T: job ${ST[$T]}"
   fi
@@ -177,7 +178,7 @@ for M in $MODELS; do
     IDS=()
     for ((i = 1; i <= NCHAIN; i++)); do
       # shellcheck disable=SC2046,SC2086
-      JID=$(run sbatch --parsable $(target_flags "$T") --time="$TIME" --job-name="s25_${NAME}" $DEP \
+      JID=$(run sbatch --parsable $(target_flags "$T" $QOS_KIND) --time="$TIME" --job-name="s25_${NAME}" $DEP \
               --output="$LOGS/$NAME/%j.out" \
               --export=ALL,PROJ="$PROJ",ARCH="$T",MODEL="$M",SEED="$S",RUN_DIR="$RUN_DIR",PATIENCE="$PATIENCE",MIN_EPOCHS="$MIN_EPOCHS",MAX_EPOCHS="$MAX_EPOCHS",MONITOR="$MONITOR",VOTE="$VOTE",INIT_CKPT="$INIT_CKPT",TRAIN_AUG="$TRAIN_AUG",RUN_TAG="$TAGN",SMOKE="$SMOKE",WALL_MIN="$(wall_min "$TIME")" \
               "$PROJ/jeanzay/train.slurm")

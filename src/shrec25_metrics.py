@@ -16,14 +16,18 @@ Definitions (per class c: TP_c, FP_c, FN_c from the confusion matrix):
   *_macro_sklearn     = mean over the union of ground-truth and predicted labels with zero_division=0,
                         i.e. sklearn.metrics.precision_recall_fscore_support(average="macro")
   *_weighted          = mean over ground-truth classes weighted by their support
+  *_micro             = from the summed TP/FP/FN over all classes; for single-label classification
+                        precision_micro = recall_micro = f1_micro = accuracy (listed explicitly)
   balanced_accuracy   = recall_macro
 
   python shrec25_metrics.py predictions.csv
   python shrec25_metrics.py predictions.csv --per-class per_class.csv --json metrics.json
+  python shrec25_metrics.py run_a.csv run_b.csv ...  [--table-csv all_metrics.csv]   # one row per file
 """
 import argparse
 import csv
 import json
+import os
 import sys
 
 import numpy as np
@@ -49,6 +53,8 @@ def compute(y_true, y_pred):
         "n": int(len(y_true)), "n_classes_in_ground_truth": int(len(gt)),
         "n_classes_predicted": int(len(np.unique(y_pred))),
         "accuracy": float(tp.sum() / len(y_true)),
+        "precision_micro": float(tp.sum() / pred_n.sum()), "recall_micro": float(tp.sum() / true_n.sum()),
+        "f1_micro": float(2 * tp.sum() / (pred_n.sum() + true_n.sum())),
         "precision_macro": float(prec[gt].mean()), "recall_macro": float(rec[gt].mean()),
         "f1_macro": float(f1[gt].mean()),
         "precision_macro_sklearn": float(prec[labels].mean()), "recall_macro_sklearn": float(rec[labels].mean()),
@@ -73,13 +79,41 @@ def read_predictions(path):
     return [int(r["class_id"]) for r in rows], [int(r[col]) for r in rows]
 
 
+TABLE_KEYS = ("accuracy", "precision_micro", "recall_micro", "f1_micro",
+              "precision_macro", "recall_macro", "f1_macro",
+              "precision_weighted", "recall_weighted", "f1_weighted", "balanced_accuracy", "f1_macro_sklearn")
+
+
+def table(paths, out_csv=None):
+    rows = []
+    for path in paths:
+        res, _ = compute(*read_predictions(path))
+        rows.append({"file": os.path.basename(path), "n": res["n"], **{k: res[k] for k in TABLE_KEYS}})
+    short = {"accuracy": "acc", "balanced_accuracy": "bal_acc", "f1_macro_sklearn": "f1_mac_skl"}
+    head = [short.get(k, k.replace("precision", "P").replace("recall", "R").replace("_weighted", "_w")
+                      .replace("_macro", "_mac").replace("_micro", "_mic")) for k in TABLE_KEYS]
+    w = max(len(r["file"]) for r in rows)
+    print(f"{'file':{w}s}  " + " ".join(f"{h:>10s}" for h in head))
+    for r in rows:
+        print(f"{r['file']:{w}s}  " + " ".join(f"{100 * r[k]:10.2f}" for k in TABLE_KEYS))
+    print("(%; micro P = R = F1 = accuracy for single-label data; macro over classes present in the ground truth)")
+    if out_csv:
+        with open(out_csv, "w", newline="") as f:
+            wr = csv.DictWriter(f, fieldnames=list(rows[0])); wr.writeheader(); wr.writerows(rows)
+        print(f"-> {out_csv}")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("predictions_csv")
-    ap.add_argument("--per-class", help="write per-class precision/recall/F1 to this CSV")
-    ap.add_argument("--json", help="write the metrics to this JSON file")
+    ap.add_argument("predictions_csv", nargs="+")
+    ap.add_argument("--per-class", help="write per-class precision/recall/F1 to this CSV (single file)")
+    ap.add_argument("--json", help="write the metrics to this JSON file (single file)")
+    ap.add_argument("--table-csv", help="with several files: also write the table to this CSV")
     a = ap.parse_args()
-    y, p = read_predictions(a.predictions_csv)
+    if len(a.predictions_csv) > 1:
+        return table(a.predictions_csv, a.table_csv)
+    y, p = read_predictions(a.predictions_csv[0])
     res, per_class = compute(y, p)
     for k, v in res.items():
         print(f"{k:26s} {v:.4f}" if isinstance(v, float) else f"{k:26s} {v}")

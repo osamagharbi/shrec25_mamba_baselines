@@ -5,6 +5,8 @@ Self-contained (Python 3 + NumPy; scikit-learn only for an optional cross-check)
 
 Input CSV columns (header names): class_id = ground truth, predicted_class = prediction
 (aliases accepted: pred, prediction, predicted_class_id). Other columns (pdb_id, protein_id) are ignored.
+A combined file (pdb_id, protein_id, class_id, <method_1>, <method_2>, ...) with one predicted-class
+column per method is also accepted: every column other than the id / ground-truth columns is scored.
 
 Definitions (per class c: TP_c, FP_c, FN_c from the confusion matrix):
   accuracy            = sum_c TP_c / N
@@ -23,6 +25,7 @@ Definitions (per class c: TP_c, FP_c, FN_c from the confusion matrix):
   python shrec25_metrics.py predictions.csv
   python shrec25_metrics.py predictions.csv --per-class per_class.csv --json metrics.json
   python shrec25_metrics.py run_a.csv run_b.csv ...  [--table-csv all_metrics.csv]   # one row per file
+  python shrec25_metrics.py all_methods.csv [--table-csv all_metrics.csv]          # one row per method column
 """
 import argparse
 import csv
@@ -33,6 +36,7 @@ import sys
 import numpy as np
 
 PRED_COLS = ("predicted_class", "pred", "prediction", "predicted_class_id")
+ID_COLS = ("pdb_id", "protein_id", "class_id", "former_class_id", "current_pdb_id")
 
 
 def compute(y_true, y_pred):
@@ -68,15 +72,26 @@ def compute(y_true, y_pred):
     return res, per_class
 
 
-def read_predictions(path):
+def read_columns(path):
+    """-> (y_true, {prediction column name: predictions}) for a single- or multi-method CSV."""
     with open(path, newline="") as f:
         rows = list(csv.DictReader(f))
     if not rows:
         raise SystemExit(f"{path}: empty")
+    if "class_id" not in rows[0]:
+        raise SystemExit(f"{path}: need a class_id (ground truth) column; got {list(rows[0])}")
     col = next((c for c in PRED_COLS if c in rows[0]), None)
-    if "class_id" not in rows[0] or col is None:
-        raise SystemExit(f"{path}: need columns class_id and one of {PRED_COLS}; got {list(rows[0])}")
-    return [int(r["class_id"]) for r in rows], [int(r[col]) for r in rows]
+    cols = [col] if col else [c for c in rows[0] if c not in ID_COLS]
+    if not cols:
+        raise SystemExit(f"{path}: no prediction column (expected one of {PRED_COLS} or one column per method)")
+    return [int(r["class_id"]) for r in rows], {c: [int(r[c]) for r in rows] for c in cols}
+
+
+def read_predictions(path):
+    y, preds = read_columns(path)
+    if len(preds) > 1:
+        raise SystemExit(f"{path}: {len(preds)} prediction columns -> use the table mode (it scores each column)")
+    return y, next(iter(preds.values()))
 
 
 TABLE_KEYS = ("accuracy", "precision_micro", "recall_micro", "f1_micro",
@@ -87,13 +102,16 @@ TABLE_KEYS = ("accuracy", "precision_micro", "recall_micro", "f1_micro",
 def table(paths, out_csv=None):
     rows = []
     for path in paths:
-        res, _ = compute(*read_predictions(path))
-        rows.append({"file": os.path.basename(path), "n": res["n"], **{k: res[k] for k in TABLE_KEYS}})
+        y, preds = read_columns(path)
+        for col, p in preds.items():
+            res, _ = compute(y, p)
+            name = os.path.basename(path) if len(preds) == 1 else col
+            rows.append({"file": name, "n": res["n"], **{k: res[k] for k in TABLE_KEYS}})
     short = {"accuracy": "acc", "balanced_accuracy": "bal_acc", "f1_macro_sklearn": "f1_mac_skl"}
     head = [short.get(k, k.replace("precision", "P").replace("recall", "R").replace("_weighted", "_w")
                       .replace("_macro", "_mac").replace("_micro", "_mic")) for k in TABLE_KEYS]
-    w = max(len(r["file"]) for r in rows)
-    print(f"{'file':{w}s}  " + " ".join(f"{h:>10s}" for h in head))
+    w = max([len("file / method")] + [len(r["file"]) for r in rows])
+    print(f"{'file / method':{w}s}  " + " ".join(f"{h:>10s}" for h in head))
     for r in rows:
         print(f"{r['file']:{w}s}  " + " ".join(f"{100 * r[k]:10.2f}" for k in TABLE_KEYS))
     print("(%; micro P = R = F1 = accuracy for single-label data; macro over classes present in the ground truth)")
@@ -111,7 +129,7 @@ def main():
     ap.add_argument("--json", help="write the metrics to this JSON file (single file)")
     ap.add_argument("--table-csv", help="with several files: also write the table to this CSV")
     a = ap.parse_args()
-    if len(a.predictions_csv) > 1:
+    if len(a.predictions_csv) > 1 or len(read_columns(a.predictions_csv[0])[1]) > 1:
         return table(a.predictions_csv, a.table_csv)
     y, p = read_predictions(a.predictions_csv[0])
     res, per_class = compute(y, p)
